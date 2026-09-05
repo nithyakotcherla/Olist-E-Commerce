@@ -216,3 +216,25 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Project-specific -------------------------------------------------------
+# The 9 Kaggle CSVs (~120 MB). Re-fetch with the Phase 1 command instead.
+raw_data/
+
+# Airflow
+logs/
+airflow.db
+airflow.cfg
+standalone_admin_password.txt
+
+# dbt (target/ is already ignored above; named here for clarity)
+dbt_ecommerce/target/
+dbt_ecommerce/logs/
+dbt_ecommerce/dbt_packages/
+dbt_ecommerce/profiles.yml
+
+# Kaggle credentials -- never commit these
+kaggle.json
+
+# Claude Code local session state
+.claude/
