@@ -1,0 +1,192 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # Simulated production database. Analysts never touch this; only the extract
+  # tasks read from it.
+  # ---------------------------------------------------------------------------
+  postgres-oltp:
+    image: postgres:13
+    container_name: postgres-oltp
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin_password
+      POSTGRES_DB: olist_production
+    ports:
+      - "5433:5432"
+    volumes:
+      - oltp_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d olist_production"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - elt
+
+  # ---------------------------------------------------------------------------
+  # Analytics warehouse. Receives raw_* tables from the load tasks; dbt models
+  # the star schema on top of them.
+  # ---------------------------------------------------------------------------
+  postgres-dw:
+    image: postgres:13
+    container_name: postgres-dw
+    environment:
+      POSTGRES_USER: dw_admin
+      POSTGRES_PASSWORD: dw_password
+      POSTGRES_DB: analytics_warehouse
+    ports:
+      - "5434:5432"
+    volumes:
+      - dw_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dw_admin -d analytics_warehouse"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - elt
+
+  # ---------------------------------------------------------------------------
+  # Airflow's own metadata database. Not published — nothing outside the
+  # compose network has any business reading it.
+  # ---------------------------------------------------------------------------
+  postgres-airflow:
+    image: postgres:13
+    container_name: postgres-airflow
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_meta_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - elt
+
+  # ---------------------------------------------------------------------------
+  # S3-compatible data lake. Holds the Hive-partitioned Parquet landing zone,
+  # which is what makes a warehouse rebuild possible without re-reading OLTP.
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - elt
+
+  # ---------------------------------------------------------------------------
+  # Orchestration. First boot installs requirements.txt, migrates the metadata
+  # DB, creates the admin user, then hands over to `airflow standalone`.
+  # Expect 3-5 minutes before port 8080 answers.
+  # ---------------------------------------------------------------------------
+  airflow:
+    image: apache/airflow:2.7.1-python3.10
+    container_name: airflow
+    depends_on:
+      postgres-airflow:
+        condition: service_healthy
+      postgres-oltp:
+        condition: service_healthy
+      postgres-dw:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    environment:
+      # `airflow standalone` defaults to SequentialExecutor on SQLite. Both of
+      # these are required for the 18 extract/load tasks to actually run in
+      # parallel.
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+
+      # Connections injected as env vars, which is why the DAG can call
+      # PostgresHook(postgres_conn_id='OLTP_DB') with nothing configured in the
+      # Airflow UI.
+      AIRFLOW_CONN_OLTP_DB: postgresql://admin:admin_password@postgres-oltp:5432/olist_production
+      AIRFLOW_CONN_DW_DB: postgresql://dw_admin:dw_password@postgres-dw:5432/analytics_warehouse
+
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: staging-lake
+
+      _PIP_ADDITIONAL_REQUIREMENTS: ""
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./requirements.txt:/requirements.txt:ro
+      - ./raw_data:/opt/airflow/raw_data
+      - airflow_logs:/opt/airflow/logs
+    command:
+      - bash
+      - -c
+      - |
+        pip install --no-cache-dir -r /requirements.txt
+        airflow db migrate
+        airflow users create \
+          --username airflow --password airflow \
+          --firstname Air --lastname Flow \
+          --role Admin --email airflow@example.com || true
+        exec airflow standalone
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+    networks:
+      - elt
+
+  # ---------------------------------------------------------------------------
+  # BI. Connects to postgres-dw over the compose network (host postgres-dw,
+  # port 5432) -- not localhost:5434, which only exists for host processes.
+  # ---------------------------------------------------------------------------
+  metabase:
+    image: metabase/metabase
+    container_name: metabase
+    depends_on:
+      postgres-dw:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    volumes:
+      - metabase_data:/metabase.db
+    environment:
+      MB_DB_FILE: /metabase.db/metabase.db
+    networks:
+      - elt
+
+# -----------------------------------------------------------------------------
+# Named volumes so `docker compose down` is no longer destructive.
+# (IMPLEMENTATION.md Phase 10, item 4 -- applied up front.)
+# -----------------------------------------------------------------------------
+volumes:
+  oltp_data:
+  dw_data:
+  airflow_meta_data:
+  airflow_logs:
+  minio_data:
+  metabase_data:
+
+networks:
+  elt:
+    driver: bridge
