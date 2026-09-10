@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Geolocation Data Contract",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "geolocation_zip_code_prefix": { "type": ["integer", "string"] },
+      "geolocation_lat": { "type": "number", "minimum": -90, "maximum": 90 },
+      "geolocation_lng": { "type": "number", "minimum": -180, "maximum": 180 },
+      "geolocation_city": { "type": "string" },
+      "geolocation_state": { "type": "string", "minLength": 2, "maxLength": 2 }
+    },
+    "required": ["geolocation_zip_code_prefix", "geolocation_lat", "geolocation_lng"]
+  }
+}
