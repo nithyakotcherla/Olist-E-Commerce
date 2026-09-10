@@ -1,23 +1,24 @@
 [project]
-name = "datanalystelt"
+name = "ecommerce-elt-pipeline"
 version = "0.1.0"
 description = "Olist ELT pipeline: Postgres OLTP -> MinIO lake -> Postgres DW -> dbt star schema -> Metabase"
 readme = "README.md"
 requires-python = ">=3.12"
-# Host-side dependencies only. These run on your machine: init_oltp_db.py
-# (Phase 3), the Kaggle download (Phase 1), and dbt (Phase 6).
-# The Airflow container installs requirements.txt instead.
+# Host-side dependencies only. These run on your machine: the synthetic data
+# generator and init_oltp_db.py. The Airflow container installs
+# requirements.txt instead, which pins different versions for its Python 3.10
+# image -- see IMPLEMENTATION.md Phase 3.
 dependencies = [
-    "pandas>=2.2",
-    "sqlalchemy>=2.0",
-    "psycopg2-binary>=2.9.7",
-    "kaggle>=1.6",
+    "pandas>=2.1.4",
+    "numpy<2.0.0",
+    "sqlalchemy>=1.4",
+    "psycopg2-binary>=2.9.9",
 ]
 
 [dependency-groups]
-# Installed separately from the core data libraries -- resolving dbt alongside
-# them in one pass produces conflicts. `uv sync --group dbt` when you reach
-# Phase 6.
+# Resolved separately from the core data libraries; dbt's own pins conflict
+# with them in a single pass. `uv sync --group dbt` to run dbt from the host.
 dbt = [
+    "dbt-core~=1.10.0",
     "dbt-postgres==1.10.0",
 ]
