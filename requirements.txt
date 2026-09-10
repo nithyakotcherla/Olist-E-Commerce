@@ -1,14 +1,6 @@
-# Dependencies installed INSIDE the Airflow container on first boot.
-# Host-side dependencies (init_oltp_db.py, dbt) live in pyproject.toml -- see
-# IMPLEMENTATION.md Phase 3 for why the two sets are kept apart.
-#
-# Do not add jsonschema or SQLAlchemy here: Airflow 2.7.1 already pins both,
-# and an unpinned entry fights its constraints.
-pandas==2.2.3
+pandas==2.1.4
 numpy<2.0.0
-psycopg2-binary==2.9.7
+psycopg2-binary==2.9.9
 boto3==1.28.44
 minio==7.1.16
-# Required by df.to_parquet() in the extract tasks. The base image does not
-# reliably carry it. (IMPLEMENTATION.md Phase 10, item 3 -- applied up front.)
-pyarrow==14.0.1
+pyarrow==17.0.0
