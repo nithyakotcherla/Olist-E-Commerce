@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Order Payments Data Contract",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "order_id": { "type": "string", "minLength": 1 },
+      "payment_sequential": { "type": "integer", "minimum": 1 },
+      "payment_type": {
+        "type": "string",
+        "enum": ["credit_card", "boleto", "voucher", "debit_card", "not_defined"]
+      },
+      "payment_installments": { "type": "integer", "minimum": 0 },
+      "payment_value": { "type": "number", "minimum": 0 }
+    },
+    "required": ["order_id", "payment_sequential", "payment_type", "payment_value"]
+  }
+}

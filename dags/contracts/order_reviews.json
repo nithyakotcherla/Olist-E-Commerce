@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Order Reviews Data Contract",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "review_id": { "type": "string", "minLength": 1 },
+      "order_id": { "type": "string", "minLength": 1 },
+      "review_score": { "type": "integer", "minimum": 1, "maximum": 5 },
+      "review_creation_date": { "type": ["string", "null"] },
+      "review_answer_timestamp": { "type": ["string", "null"] }
+    },
+    "required": ["review_id", "order_id", "review_score"]
+  }
+}
