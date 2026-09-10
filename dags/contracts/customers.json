@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Customers Data Contract",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "customer_id": { "type": "string", "minLength": 1 },
+      "customer_unique_id": { "type": "string", "minLength": 1 },
+      "customer_zip_code_prefix": { "type": ["integer", "string"] },
+      "customer_city": { "type": "string" },
+      "customer_state": { "type": "string", "minLength": 2, "maxLength": 2 }
+    },
+    "required": ["customer_id", "customer_unique_id", "customer_zip_code_prefix", "customer_state"]
+  }
+}

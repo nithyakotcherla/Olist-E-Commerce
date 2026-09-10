@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Sellers Data Contract",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "seller_id": { "type": "string", "minLength": 1 },
+      "seller_zip_code_prefix": { "type": ["integer", "string"] },
+      "seller_city": { "type": "string" },
+      "seller_state": { "type": "string", "minLength": 2, "maxLength": 2 }
+    },
+    "required": ["seller_id", "seller_zip_code_prefix", "seller_state"]
+  }
+}
