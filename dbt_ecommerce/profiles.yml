@@ -1,0 +1,12 @@
+dbt_ecommerce:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('DBT_HOST', 'localhost') }}"
+      port: "{{ env_var('DBT_PORT', '5434') | int }}"
+      user: dw_admin
+      password: dw_password
+      dbname: analytics_warehouse
+      schema: public
+      threads: 4
