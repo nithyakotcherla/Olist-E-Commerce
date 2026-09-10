@@ -1,37 +1,22 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "orders data contract",
-  "description": "Applied to the full orders extract before it lands in the lake. Note that validate_data_contract() stringifies the frame first, so the 'string' type assertions pass trivially -- the enum and the required list are the checks doing real work. See IMPLEMENTATION.md Phase 0, gap 3.",
+  "title": "Orders Data Contract",
   "type": "array",
   "items": {
     "type": "object",
     "properties": {
-      "order_id": { "type": "string" },
-      "customer_id": { "type": "string" },
+      "order_id": { "type": "string", "minLength": 1 },
+      "customer_id": { "type": "string", "minLength": 1 },
       "order_status": {
         "type": "string",
-        "enum": [
-          "delivered",
-          "shipped",
-          "canceled",
-          "unavailable",
-          "invoiced",
-          "processing",
-          "created",
-          "approved"
-        ]
+        "enum": ["delivered", "shipped", "canceled", "invoiced", "processing", "unavailable", "approved", "created"]
       },
-      "order_purchase_timestamp": { "type": "string" },
-      "order_approved_at": { "type": "string" },
-      "order_delivered_carrier_date": { "type": "string" },
-      "order_delivered_customer_date": { "type": "string" },
-      "order_estimated_delivery_date": { "type": "string" }
+      "order_purchase_timestamp": { "type": "string", "minLength": 1 },
+      "order_approved_at": { "type": ["string", "null"] },
+      "order_delivered_carrier_date": { "type": ["string", "null"] },
+      "order_delivered_customer_date": { "type": ["string", "null"] },
+      "order_estimated_delivery_date": { "type": ["string", "null"] }
     },
-    "required": [
-      "order_id",
-      "customer_id",
-      "order_status",
-      "order_purchase_timestamp"
-    ]
+    "required": ["order_id", "customer_id", "order_status", "order_purchase_timestamp"]
   }
 }
