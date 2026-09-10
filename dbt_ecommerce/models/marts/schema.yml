@@ -1,0 +1,109 @@
+version: 2
+
+models:
+  - name: dim_customers
+    description: "Dimension table for customer details"
+    columns:
+      - name: customer_id
+        description: "Primary key for customers"
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_sellers
+    columns:
+      - name: seller_id
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_products
+    description: "Dimension table for products, with category names translated to English"
+    columns:
+      - name: product_id
+        description: "Primary key for products"
+        tests:
+          - unique
+          - not_null
+      - name: category_name
+        description: "English category name, COALESCEd to 'unknown' when untranslated"
+        tests:
+          - not_null
+
+  - name: dim_geography
+    description: "One row per zip code prefix, averaged from raw geolocation coordinates"
+    columns:
+      - name: zip_code
+        description: "Primary key - zip code prefix"
+        tests:
+          - unique
+          - not_null
+
+  - name: fact_sales
+    description: "Core fact table tracking individual items sold"
+    columns:
+      - name: order_id
+        description: "The ID of the order"
+        tests:
+          - not_null
+
+      - name: customer_id
+        description: "Foreign key linking to dim_customers"
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customers')
+              field: customer_id
+
+      - name: seller_id
+        description: "Foreign key linking to dim_sellers"
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_sellers')
+              field: seller_id
+
+      - name: product_id
+        description: "Foreign key linking to dim_products"
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_products')
+              field: product_id
+
+      - name: price
+        description: "The item price"
+        tests:
+          - not_null
+
+  - name: fact_payments
+    description: "One row per payment sequence on an order"
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+      - name: payment_value
+        description: "Payment amount - NULLs would silently break revenue sums"
+        tests:
+          - not_null
+      - name: payment_type
+        tests:
+          - accepted_values:
+              values: ['credit_card', 'boleto', 'voucher', 'debit_card', 'not_defined']
+
+  - name: fact_reviews
+    description: "One row per customer review"
+    columns:
+      - name: review_id
+        tests:
+          - not_null
+      - name: order_id
+        tests:
+          - not_null
+      - name: review_score
+        description: "Olist reviews are a 1-5 star scale"
+        tests:
+          - not_null
+          - accepted_values:
+              values: [1, 2, 3, 4, 5]
+              quote: false
