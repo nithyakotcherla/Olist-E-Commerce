@@ -218,7 +218,8 @@ __marimo__/
 .streamlit/secrets.toml
 
 # --- Project-specific -------------------------------------------------------
-# The 9 Kaggle CSVs (~120 MB). Re-fetch with the Phase 1 command instead.
+# The 9 source CSVs. Regenerate with generate_synthetic_olist.py, or download
+# the real dataset from Kaggle -- either way they do not belong in the repo.
 raw_data/
 
 # Airflow
@@ -231,10 +232,20 @@ standalone_admin_password.txt
 dbt_ecommerce/target/
 dbt_ecommerce/logs/
 dbt_ecommerce/dbt_packages/
-dbt_ecommerce/profiles.yml
 
 # Kaggle credentials -- never commit these
 kaggle.json
 
 # Claude Code local session state
 .claude/
+
+# Local MinIO object storage (the data lake's on-disk state)
+minio_data/
+
+# Local Postgres volume dirs, if bind-mounted instead of named volumes
+postgres_oltp_data/
+postgres_dw_data/
+postgres_airflow_data/
+
+# dbt writes an anonymous user id here
+.user.yml
