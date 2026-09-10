@@ -14,13 +14,13 @@ several later phases behave.
 | Phase | Name | Outcome |
 |---|---|---|
 | [0](#phase-0--orientation) | Orientation | You know what exists and what doesn't |
-| [1](#phase-1--get-the-data) | Get the data | 9 Kaggle CSVs in `raw_data/` |
+| [1](#phase-1--get-the-data) | Get the data | 9 CSVs in `raw_data/` |
 | [2](#phase-2--stand-up-the-infrastructure) | Stand up the infrastructure | 6 containers healthy |
 | [3](#phase-3--seed-the-source-database) | Seed the source database | ~100k orders in the OLTP Postgres |
 | [4](#phase-4--extract-validate-land-in-the-lake) | Extract, validate, land | Parquet partitions in MinIO |
 | [5](#phase-5--load-the-lake-into-the-warehouse) | Load into the warehouse | 9 `raw_*` tables in the DW |
-| [6](#phase-6--model-the-star-schema) | Model the star schema | 9 views + 6 mart tables |
-| [7](#phase-7--gate-the-build-with-tests) | Gate with tests | `PASS=10` |
+| [6](#phase-6--model-the-star-schema) | Model the star schema | 9 views + 7 mart tables |
+| [7](#phase-7--gate-the-build-with-tests) | Gate with tests | `PASS=24` |
 | [8](#phase-8--serve-it-in-metabase) | Serve it | A dashboard on the star schema |
 | [9](#phase-9--prove-the-incremental-logic) | Prove the incremental logic | A late-arriving update merged, not rebuilt |
 | [10](#phase-10--extend-it) | Extend it | The gaps closed, in priority order |
@@ -28,13 +28,6 @@ several later phases behave.
 ---
 
 ## Phase 0 — Orientation
-
-> **How this repository came to exist.** This document was written first, as a spec, and
-> the code was authored from it. Phases 0–2 are built: `docker-compose.yml`, `dags/` with
-> the DAG and the `orders` contract, `init_oltp_db.py`, and the ignore rules. **The dbt
-> project is not built yet** — Phase 6 authors it. Two of the Phase 10 items were applied
-> up front because without them the build fails or destroys itself: `pyarrow` is pinned
-> and named volumes are declared. Both are marked below.
 
 ### What this project actually is
 
@@ -58,55 +51,72 @@ build that fails loudly instead of silently.
 | `airflow` | apache/airflow:2.7.1-python3.10 | 8080 | Orchestration |
 | `metabase` | metabase/metabase | 3000 | BI |
 
-### Where the diagram and the code disagree
+### Where the diagram and the code once disagreed
 
-These are not bugs you need to fix to get a working pipeline. They are things you must
-know so you are not waiting for something that will never happen.
+The six items below were the gaps between the README's flowchart and the code as
+originally written. Four are now closed. They are kept here because knowing *why* each
+one mattered is the point, and because two are still live.
 
-**1. Airflow does not trigger dbt.** The README's flowchart shows
-`B -. Triggers .-> G` (Airflow → dbt models). `dags/elt_pipeline_minio.py` contains only
-extract and load tasks — 9 tables × 2 tasks = 18 tasks, no dbt operator anywhere. **dbt is
-run by hand from your terminal in Phase 6.** Closing this gap is the first item in Phase 10.
+**1. Airflow does not trigger dbt.** ✅ **Closed.** The DAG now collects every
+`load_<table>_to_dw` task into a list and expresses `load_tasks >> dbt_run >> dbt_test`,
+so the star schema is built and tested in the same run that lands the data. dbt itself
+lives in a separate virtualenv at `/opt/airflow/dbt_venv`, provisioned on first boot,
+because resolving `dbt-core` against Airflow's own pins in the same environment breaks
+both.
 
-**2. The extract/load is full-refresh, not incremental.** In `load_from_minio_to_dw()`:
+**2. The extract/load is full-refresh, not incremental.** Still true, deliberately. Each
+DAG run replaces every `raw_*` table in full; the incremental story lives inside dbt
+(`fact_sales`), not in the EL layer. The lake keeps the partitioned history, so this is a
+legitimate design — but do not describe the pipeline as end-to-end incremental, because
+anyone who opens the DAG will see otherwise.
 
-```python
-df.to_sql(name=f"raw_{table_name}", con=engine, schema='public',
-          if_exists='replace', index=False)
+The load does *not* use `if_exists='replace'` any more, though. A plain replace issues
+`DROP TABLE`, which Postgres refuses once dbt has built staging views on top:
+
+```
+cannot drop table raw_orders because other objects depend on it
 ```
 
-Every DAG run drops and rebuilds each `raw_*` table in full. The incremental story in this
-project is true *only inside dbt* (`fact_sales`), not in the EL layer. That is a legitimate
-design — the lake keeps the partitioned history — but do not describe the pipeline as
-end-to-end incremental, because an interviewer who opens this file will see otherwise.
+`load_from_minio_to_dw()` now compares the incoming columns against the existing table.
+Same layout → `TRUNCATE` + append, which gives identical full-refresh semantics without
+breaking dependent objects. Genuinely changed layout → `DROP ... CASCADE` and let the
+downstream `dbt_run` rebuild the views.
 
-**3. The data contract is weaker than it looks.** `validate_data_contract()` runs
-`df.astype(str)` before validating. Since every value becomes a string, every
-`{"type": "string"}` assertion in `dags/contracts/orders.json` passes trivially. The only
-checks doing real work are the `enum` on `order_status` and the `required` key list. It
-also validates all ~100k records in a single `validate()` call, which is slow.
+**3. The data contract is weaker than it looks.** ✅ **Closed.** The original
+`validate_data_contract()` ran `df.astype(str)` before validating, so every value became a
+string and every `{"type": "string"}` assertion passed trivially. `_json_safe()` replaces
+it: only timestamps are stringified, numerics stay numeric, and NaN/NaT become `None` so
+the `["string", "null"]` unions match. The `integer`, `number` and `minimum` assertions now
+do real work.
 
-**4. Only one table has a contract.** `dags/contracts/` contains `orders.json` and nothing
-else. The other 8 tables hit the `FileNotFoundError` branch, log
-`⚠️ No contract found`, and pass through unvalidated. This is intentional and documented
-in the README, but it means "the pipeline enforces data contracts" describes 1 of 9 tables.
+It also validated all ~100k records in a single `validate()` call, which was the slowest
+step in the extract task. Validation now runs on a seeded 2,000-row random sample
+(`CONTRACT_SAMPLE_SIZE`). That trades exhaustiveness for speed — a violation in an
+unsampled row gets through — which is the right trade for schema drift, since drift
+affects every row, not one.
 
-**5. `dbt deps` is a no-op.** The README's run instructions include it, but there is no
-`packages.yml` in `dbt_ecommerce/`. Harmless; it exits immediately.
+**4. Only one table has a contract.** ✅ **Closed.** All nine tables now have a contract in
+`dags/contracts/`. The `FileNotFoundError` branch still exists and still logs
+`⚠️ No contract found`, so adding a tenth table fails open rather than crashing.
 
-**6. Nothing is persisted.** ✅ **Fixed.** `docker-compose.yml` declares six named volumes
-— `oltp_data`, `dw_data`, `airflow_meta_data`, `airflow_logs`, `minio_data`,
-`metabase_data` — so `docker compose down` no longer destroys the warehouse, the Airflow
-metadata, or a Metabase dashboard. `docker compose stop` is still the cheaper habit while
-working, and `down -v` still wipes everything.
+**5. `dbt deps` is a no-op.** Still true. There is no `packages.yml` in `dbt_ecommerce/`,
+so the command exits immediately. Harmless — the run instructions no longer include it.
+
+**6. Nothing is persisted.** ✅ **Closed.** Named volumes are declared for
+`postgres-oltp`, `postgres-dw`, `postgres-airflow` and `metabase`, so
+`docker compose down` no longer destroys the warehouse or a Metabase dashboard.
+`docker compose stop` is still the cheaper habit while working, and `down -v` still wipes
+everything.
 
 ### Prerequisites
 
 - Docker Desktop, running, with roughly 8 GB allocated. Check with
-  `docker info --format '{{.MemTotal}}'` — the default 4 GB will run this stack but leaves
-  little headroom once Airflow and Metabase are both up.
+  `docker info --format '{{.MemTotal}}'` — on a 4 GB default the Metabase JVM gets
+  OOM-killed (exit 137) when the load tasks spike, which is why `docker-compose.yml`
+  caps it with `JAVA_OPTS: -Xmx768m` and `mem_limit: 2g`.
 - [uv](https://docs.astral.sh/uv/) on the host — this repo is uv-managed (Python 3.12)
-- A Kaggle account, and an API token at `~/.kaggle/kaggle.json`
+- A Kaggle account, *or* nothing at all: `generate_synthetic_olist.py` produces a
+  stand-in dataset with the same shape
 - ~3 GB free disk
 
 ---
@@ -116,23 +126,23 @@ working, and `down -v` still wipes everything.
 The repository ships no data. `raw_data/` is referenced by `docker-compose.yml` and
 `init_oltp_db.py` but does not exist until you create it.
 
-First, an API token. Kaggle downloads are authenticated even for public datasets:
-<https://www.kaggle.com/settings> → **Create New Token**, which downloads `kaggle.json`.
-
-```bash
-mkdir -p ~/.kaggle && mv ~/Downloads/kaggle.json ~/.kaggle/
-chmod 600 ~/.kaggle/kaggle.json
-```
-
-Then install the host dependencies and pull the dataset:
+Two ways to fill it. Either download the
+[Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
+and extract it, or generate a stand-in that needs no Kaggle account:
 
 ```bash
 uv sync
-uv run kaggle datasets download -d olistbr/brazilian-ecommerce -p raw_data --unzip
+uv run python generate_synthetic_olist.py
 ```
 
-That gives you the [Brazilian E-Commerce Public Dataset by Olist](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
-with the filenames matching exactly what `init_oltp_db.py` maps:
+The generator writes the same nine filenames with the same columns and the real row
+counts (99,441 orders, 112,650 line items), with referential integrity intact so the dbt
+tests pass. Geolocation is cut to 200k rows from the real ~1M, since every pandas
+round-trip in the DAG pays for that table's size. Switching to the real data later means
+extracting the Kaggle zip over `raw_data/` and re-running `init_oltp_db.py` — no pipeline
+code changes.
+
+Either way the filenames must match exactly what `init_oltp_db.py` maps:
 
 ```
 raw_data/
@@ -179,21 +189,20 @@ The two database connections Airflow needs are injected as environment variables
 configure in the Airflow UI. That is why the DAG can call
 `PostgresHook(postgres_conn_id='OLTP_DB')` with no setup step.
 
-`AIRFLOW__CORE__EXECUTOR=LocalExecutor` and `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` are set
-in the same block, and both matter. `airflow standalone` otherwise falls back to the
-SequentialExecutor on SQLite, and the 18 tasks in Phase 4 will run one at a time instead of
-in parallel.
-
 **Verify:** all six services `Up`; `http://localhost:8080` shows the login page
 (`airflow` / `airflow`); `http://localhost:9001` shows the MinIO console
 (`minioadmin` / `minioadmin`).
 
+First boot also provisions dbt into its own virtualenv at `/opt/airflow/dbt_venv`, which
+is why Phase 6 needs no manual install. That step is guarded by an `if [ ! -x ... ]`, so
+restarts skip it.
+
 Three checks worth doing now rather than discovering the answer in Phase 4:
 
 ```bash
-docker compose exec airflow airflow config get-value core executor    # LocalExecutor
+docker compose exec airflow airflow config get-value core executor       # LocalExecutor
 docker compose exec airflow python -c "import pyarrow; print(pyarrow.__version__)"
-docker compose exec airflow airflow tasks list oltp_s3_olap_pipeline | wc -l   # 18
+docker compose exec airflow /opt/airflow/dbt_venv/bin/dbt --version
 ```
 
 ---
@@ -209,17 +218,15 @@ uv run python init_oltp_db.py
 ```
 
 **Host and container dependencies are deliberately separate.** `requirements.txt` is
-installed *inside* the Airflow container and pins what that Python 3.10 image needs
-(pandas 2.2.3, `numpy<2.0.0`). `pyproject.toml` holds the host set — pandas, SQLAlchemy,
-psycopg2-binary, kaggle — resolved by uv against this repo's Python 3.12. Installing the
-container pins into the host venv, as an earlier draft of this doc suggested, downgrades
-pandas for no reason and can fail outright.
+installed *inside* the Airflow container and pins what its Python 3.10 image needs.
+`pyproject.toml` holds the host set, resolved by uv against Python 3.12. Installing the
+container pins into the host environment downgrades pandas for no reason.
 
-dbt is in its own dependency group for the same reason the original two-step install
-existed — resolving it alongside everything else produces conflicts:
+dbt sits in its own dependency group for the same reason it gets its own virtualenv in
+the container — resolving it alongside everything else conflicts:
 
 ```bash
-uv sync --group dbt              # when you reach Phase 6
+uv sync --group dbt              # only if you want to run dbt from the host
 ```
 
 The script reads each CSV with pandas and writes it to Postgres with
@@ -244,15 +251,21 @@ Open `http://localhost:8080`, unpause **`oltp_s3_olap_pipeline`**, and trigger i
 
 The DAG builds its task graph in a loop over the `TABLES` list, giving each table an
 independent `extract_<table>_to_minio >> load_<table>_to_dw` chain — 18 tasks with no
-cross-table dependencies, so they parallelize under the `LocalExecutor`.
+cross-table dependencies, so they parallelize under the `LocalExecutor`. `max_active_tasks`
+caps that at 4: nine tables loading concurrently, each buffering a full DataFrame, is
+enough to get containers OOM-killed on a laptop.
+
+Every load then fans into `dbt_run >> dbt_test`, so one trigger takes you from the source
+database to a tested star schema — 20 tasks in total.
 
 What each extract task does, in order:
 
 1. `PostgresHook(postgres_conn_id='OLTP_DB').get_pandas_df("SELECT * FROM <table>;")` —
    a full read into a DataFrame.
 2. **`validate_data_contract(df, table_name)`** — the interceptor. Looks for
-   `dags/contracts/<table>.json`. Found → validate and raise `ValueError` on violation.
-   Not found → log a warning and continue.
+   `dags/contracts/<table>.json`. Found → validate a 2,000-row sample and raise
+   `ValueError` on violation. Not found → log a warning and continue. All nine tables have
+   a contract, so the warning branch only fires if you add a tenth table.
 3. `df.to_parquet(buffer)` — serialize in memory, no temp files.
 4. Create `staging-lake` if absent, then `put_object` under a Hive-style key:
    `<table>/dt=<YYYY-MM-DD>/<table>.parquet`, where the date is Airflow's `{{ ds }}`.
@@ -265,12 +278,15 @@ source database.
 `extract_orders_to_minio` and look for:
 
 ```
-✅ Data Contract validation passed for orders.
+✅ Data Contract validation passed for orders (2,000 of 99,441 records sampled).
 ```
 
-Then check any other table's log — say `extract_products_to_minio` — and you should see
-the `⚠️ No contract found` line instead. Seeing both is how you confirm you understand
-gap 4 from Phase 0.
+Every table logs its own version of that line. To watch the interceptor actually bite,
+break something on purpose — set one order's `order_status` to a value outside the enum in
+the OLTP database and re-run the task. It should fail with
+`❌ DATA CONTRACT VIOLATION in orders`, and nothing should reach the lake. Note you may
+need to raise `CONTRACT_SAMPLE_SIZE` for a single bad row to land in the sample; that
+limitation is Phase 10, item 2.
 
 **Verify the lake:** MinIO console → Object Browser → `staging-lake`. Expect 9 prefixes,
 each holding `dt=<today>/<table>.parquet`.
@@ -301,41 +317,35 @@ Expect 9 tables, all `raw_`-prefixed: `raw_customers`, `raw_orders`, `raw_order_
 
 ## Phase 6 — Model the star schema
 
-> **`dbt_ecommerce/` does not exist yet.** This phase authors it as well as running it —
-> `dbt_project.yml`, `models/staging/` (9 views + `sources.yml`) and `models/marts/`
-> (3 dims, 3 facts, `schema.yml`). The model contents are fully specified below; running
-> `dbt run` before writing them will report no models found. Install dbt first with
-> `uv sync --group dbt`.
+### The dbt profile is committed
 
-### Configure the dbt profile
-
-Not in the repository — you must create it. Either `~/.dbt/profiles.yml` or
-`dbt_ecommerce/profiles.yml`:
+`dbt_ecommerce/profiles.yml` is in the repository, which it has to be: the `dbt_run` task
+passes `--profiles-dir /opt/airflow/dbt_ecommerce`, so a fresh clone would otherwise fail
+inside Airflow. It carries no secret the compose file does not already publish, and it
+resolves its host from the environment:
 
 ```yaml
-dbt_ecommerce:
-  target: dev
-  outputs:
-    dev:
-      type: postgres
-      host: localhost
-      user: dw_admin
-      password: dw_password
-      port: 5434
-      dbname: analytics_warehouse
-      schema: public
-      threads: 4
+host: "{{ env_var('DBT_HOST', 'localhost') }}"
+port: "{{ env_var('DBT_PORT', '5434') | int }}"
 ```
 
-Port **5434** — the DW's published port. Using 5433 points dbt at the OLTP database, where
-no `raw_*` tables exist, and you get a confusing "source not found" failure.
+`docker-compose.yml` sets `DBT_HOST=postgres-dw` and `DBT_PORT=5432` on the Airflow
+service, so the same file works over the Docker network. From your host neither is set, so
+it falls back to `localhost:5434` — the DW's published port. Port 5433 would point dbt at
+the OLTP database, where no `raw_*` tables exist, and produce a confusing "source not
+found" failure.
 
 ### Build
 
+**Normally you do not run this by hand.** `dbt_run` and `dbt_test` are the last two tasks
+in the DAG, so triggering the pipeline in Phase 4 already built the star schema. This
+section is for when you want to iterate on a model without a full DAG run:
+
 ```bash
+uv sync --group dbt
 cd dbt_ecommerce
-dbt debug                 # confirms the connection before you waste a build
-dbt run --full-refresh
+uv run dbt debug --profiles-dir .        # confirms the connection first
+uv run dbt run --profiles-dir . --full-refresh
 ```
 
 `--full-refresh` matters on the first build: `fact_sales` is incremental, and it needs to
@@ -363,16 +373,23 @@ The most recent event anywhere in the order's lifecycle becomes its `updated_at`
 expression. This synthetic high-water mark is what makes Phase 9 possible, and it is the
 single most interview-worthy line in the repository.
 
-**Marts — 6 models, materialized as tables.**
+**Marts — 7 models, materialized as tables.**
 
 | Model | Grain | Notes |
 |---|---|---|
 | `dim_customers` | one row per `customer_id` | `SELECT DISTINCT` |
 | `dim_sellers` | one row per `seller_id` | `SELECT DISTINCT` |
 | `dim_products` | one row per `product_id` | joins the category translation, `COALESCE`s to `'unknown'` |
+| `dim_geography` | one row per zip code prefix | averages the many coordinates per prefix; `MODE()` for city/state |
 | `fact_sales` | one row per order **line item** | **incremental** |
 | `fact_payments` | one row per payment sequence | table |
 | `fact_reviews` | one row per review | table |
+
+`dim_geography` exists because raw geolocation carries many rows per zip prefix — one per
+captured coordinate — so it cannot be joined as a dimension without collapsing it first.
+Averaging the lat/long and taking the modal city and state gives one row per prefix, and
+`coordinate_count` keeps the sample size visible so you can tell a well-surveyed prefix
+from a single stray reading.
 
 `fact_sales` is the only incremental model:
 
@@ -405,31 +422,35 @@ orders, and orders outnumber nothing here since Olist has one order per customer
 
 ## Phase 7 — Gate the build with tests
 
+The DAG's `dbt_test` task already ran these. To run them yourself:
+
 ```bash
-dbt test
+cd dbt_ecommerce && uv run dbt test --profiles-dir .
 ```
 
-Expect exactly `PASS=10 WARN=0 ERROR=0 SKIP=0 TOTAL=10`. All ten are declared in
+Expect `PASS=24 WARN=0 ERROR=0 SKIP=0 TOTAL=24`, all declared in
 `models/marts/schema.yml`:
 
-| # | Model | Column | Test | What it protects against |
-|---|---|---|---|---|
-| 1, 2 | `dim_customers` | `customer_id` | `unique`, `not_null` | A duplicated dimension row silently doubling every joined metric |
-| 3, 4 | `dim_sellers` | `seller_id` | `unique`, `not_null` | The same, on the seller side |
-| 5 | `fact_sales` | `order_id` | `not_null` | Orphan line items with no parent order |
-| 6 | `fact_sales` | `customer_id` | `not_null` | Revenue that cannot be attributed |
-| 7 | `fact_sales` | `customer_id` | `relationships` → `dim_customers` | A join that would drop rows — the classic silent revenue leak |
-| 8 | `fact_sales` | `seller_id` | `not_null` | Unattributable seller performance |
-| 9 | `fact_sales` | `seller_id` | `relationships` → `dim_sellers` | The same, seller side |
-| 10 | `fact_sales` | `price` | `not_null` | A NULL that makes `SUM(price)` quietly wrong |
+| Model | Column | Tests | What it protects against |
+|---|---|---|---|
+| `dim_customers` | `customer_id` | `unique`, `not_null` | A duplicated dimension row silently doubling every joined metric |
+| `dim_sellers` | `seller_id` | `unique`, `not_null` | The same, on the seller side |
+| `dim_products` | `product_id` | `unique`, `not_null` | The same, on the product side |
+| `dim_products` | `category_name` | `not_null` | An untranslated category slipping through the `COALESCE` |
+| `dim_geography` | `zip_code` | `unique`, `not_null` | The collapse-to-one-row-per-prefix logic silently regressing |
+| `fact_sales` | `order_id` | `not_null` | Orphan line items with no parent order |
+| `fact_sales` | `customer_id` | `not_null`, `relationships` → `dim_customers` | A join that would drop rows — the classic silent revenue leak |
+| `fact_sales` | `seller_id` | `not_null`, `relationships` → `dim_sellers` | Unattributable seller performance |
+| `fact_sales` | `product_id` | `not_null`, `relationships` → `dim_products` | Revenue that cannot be tied to a product |
+| `fact_sales` | `price` | `not_null` | A NULL that makes `SUM(price)` quietly wrong |
+| `fact_payments` | `order_id`, `payment_value` | `not_null` | NULLs silently breaking revenue sums |
+| `fact_payments` | `payment_type` | `accepted_values` | A new payment method appearing unnoticed |
+| `fact_reviews` | `review_id`, `order_id` | `not_null` | Reviews that cannot be attributed |
+| `fact_reviews` | `review_score` | `not_null`, `accepted_values` 1–5 | A score outside the scale skewing every average |
 
-The two `relationships` tests are the valuable ones: they assert referential integrity that
-Postgres is not enforcing, because the warehouse tables are created by pandas `to_sql` with
-no foreign keys.
-
-**Note what is *not* tested:** `dim_products`, `fact_payments` and `fact_reviews` have zero
-tests. That is the cheapest meaningful contribution you can make to this repo — Phase 10,
-item 2.
+The three `relationships` tests are the valuable ones: they assert referential integrity
+that Postgres is not enforcing, because the warehouse tables are created by pandas
+`to_sql` with no foreign keys.
 
 **Make a test fail on purpose.** You do not understand a test suite you have never seen go
 red. Add to `schema.yml` under `fact_sales`:
@@ -503,12 +524,14 @@ SET order_delivered_customer_date = NOW()::text,
 WHERE order_id = (SELECT order_id FROM orders WHERE order_status = 'shipped' LIMIT 1);"
 ```
 
-**3. Re-run the pipeline** — trigger the DAG again so the change reaches `raw_orders`.
+**3. Re-run the pipeline** — trigger the DAG again. The change reaches `raw_orders`, and
+the DAG's own `dbt_run` task rebuilds `fact_sales` incrementally, because it runs without
+`--full-refresh` (which is the whole point).
 
-**4. Run dbt incrementally** (no `--full-refresh`, which is the whole point):
+To watch it in isolation instead:
 
 ```bash
-cd dbt_ecommerce && dbt run --select fact_sales
+cd dbt_ecommerce && uv run dbt run --profiles-dir . --select fact_sales
 ```
 
 **5. Observe.** Re-run the count query. `max(updated_at)` jumps to today. The row count
@@ -521,81 +544,69 @@ Put the before/after numbers in your README. That is a result, not a claim.
 
 ## Phase 10 — Extend it
 
-In priority order — the first two are what a reviewer would notice first.
+The six items that used to live here are all done: Airflow runs dbt, all nine contracts
+are written with typed sampled validation, every mart is tested, volumes are declared,
+`pyarrow` is pinned, and `geolocation` feeds `dim_geography`. What follows is what is
+genuinely still open, in priority order.
 
-**1. Make Airflow actually run dbt.** Closes the largest diagram-versus-code gap. Append to
-`elt_pipeline_minio.py`, after the task loop:
+**1. Make the EL layer incremental.** This is the largest remaining gap and the one a
+reviewer will find first. Every DAG run still extracts each table in full and rewrites the
+whole `raw_*` table. `stg_orders` already manufactures an `updated_at` high-water mark —
+push the same idea one layer up: track the last-loaded watermark per table, filter the
+`SELECT` in `extract_to_minio()`, and append rather than truncate. The lake's `dt=`
+partitioning already supports it; only the queries need to change.
 
-```python
-from airflow.operators.bash import BashOperator
+**2. Validate the whole extract, cheaply.** `CONTRACT_SAMPLE_SIZE = 2000` trades
+exhaustiveness for speed, so a violation in an unsampled row gets through. That is the
+right trade for schema drift, which affects every row, but the wrong one for a bad value
+in a single record. A vectorised check on the columns the contract constrains — dtype,
+range, enum membership — would cover 100% of rows in less time than the current sample
+takes.
 
-dbt_run = BashOperator(
-    task_id='dbt_run',
-    bash_command='cd /opt/airflow/dbt_ecommerce && dbt run',
-)
-dbt_test = BashOperator(
-    task_id='dbt_test',
-    bash_command='cd /opt/airflow/dbt_ecommerce && dbt test',
-)
-dbt_run >> dbt_test
-```
+**3. Run the tests in CI.** `dbt test` only gates a DAG run today, so a broken model can
+be committed and pushed. A GitHub Actions workflow that spins up Postgres, seeds it from
+`generate_synthetic_olist.py`, and runs `dbt build` would catch it at the PR.
 
-This needs three supporting changes: mount `./dbt_ecommerce` into the Airflow container in
-`docker-compose.yml`, install `dbt-postgres` inside that container, and collect the load
-tasks into a list so you can express `load_tasks >> dbt_run` instead of leaving dbt
-dangling. Doing it with `airflow.providers.common.sql` or Cosmos is nicer still, but the
-`BashOperator` version is honest and readable.
+**4. Join `dim_geography` onto the customer and seller dimensions.** The dimension exists
+but nothing references it. A `zip_code` join onto `dim_customers` and `dim_sellers`
+unlocks the map visualisations the dataset is actually good for.
 
-**2. Test the three untested marts.** `dim_products.product_id` gets `unique` + `not_null`;
-`fact_reviews.review_score` gets an `accepted_values` test for 1–5;
-`fact_payments.payment_value` gets `not_null`. Six more tests, twenty minutes, and it makes
-the suite coherent rather than partial.
+**5. Add `dbt_utils` and source freshness.** There is still no `packages.yml`, so
+`dbt deps` remains a no-op and tests like `accepted_range` and `expression_is_true` are
+unavailable. A `freshness:` block in `sources.yml` would also catch a DAG that silently
+stopped landing data.
 
-**3. Write the remaining eight data contracts.** `dags/contracts/` has one file. Model the
-new ones on `orders.json`, and while you are there, fix the `df.astype(str)` weakness from
-Phase 0 by validating a typed sample instead of the stringified whole — it makes the type
-assertions mean something and stops the 100k-record single-call validation.
-
-**4. Use `geolocation`.** It is extracted, loaded, and staged as `stg_geolocation`, but no
-mart consumes it. A `dim_geography`, or lat/long joined onto `dim_customers`, unlocks the
-map visualizations the dataset is actually good for.
-
-> Two items that were on this list are already done: `pyarrow` is pinned in
-> `requirements.txt`, and named volumes are declared in `docker-compose.yml`. Both were
-> applied when the repo was built — see the Phase 0 note.
-
----
+**6. Stop shipping credentials in plaintext.** Every password lives in
+`docker-compose.yml`. Fine for a local demo, and worth replacing with a `.env` file and
+`env_file:` references before anyone mistakes the pattern for a recommendation.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Port 8080 refuses connection for several minutes | Airflow is still doing first-boot pip install + db migrate | `docker compose logs -f airflow` and wait |
-| The 18 tasks run one at a time | `AIRFLOW__CORE__EXECUTOR` missing, so `standalone` fell back to SequentialExecutor | `airflow config get-value core executor` should say `LocalExecutor`; check the env block |
-| `401 Unauthorized` from the `kaggle` command | No token, or wrong permissions on it | `~/.kaggle/kaggle.json`, `chmod 600` |
 | dbt: source `olist.raw_orders` not found | Profile points at port 5433 (OLTP) instead of 5434 (DW) | Fix `profiles.yml`; confirm with `dbt debug` |
 | Metabase cannot reach the database at `localhost:5434` | Metabase resolves names on the Docker network | Use host `postgres-dw`, port `5432` |
 | `WARNING: File ... not found. Skipping <table>` | A CSV is renamed or missing | Match the exact Kaggle filenames from Phase 1 |
 | `dbt run` rebuilds all of `fact_sales` every time | `--full-refresh` left in the command | Drop the flag after the first build |
-| Containers exit or the stack is sluggish | Docker Desktop's default 4 GB is tight for six containers | Raise it to ~8 GB in Docker Desktop → Settings → Resources |
+| `cannot drop table raw_orders because other objects depend on it` | An older load used `if_exists='replace'`, which issues `DROP TABLE` under dbt's views | Already handled — the load truncates and appends. If you see it, you are on a stale DAG file |
+| Metabase container exits with code 137 | The JVM was OOM-killed | Already capped via `JAVA_OPTS` and `mem_limit`; raise Docker Desktop's memory if it persists |
+| `dbt_run` fails with "Could not find profile" | `profiles.yml` missing from `dbt_ecommerce/` | It is committed — confirm the volume mount in `docker-compose.yml` |
 
 ---
 
 ## Verification checklist
 
-- [ ] 9 CSVs in `raw_data/`
+- [ ] 9 CSVs in `raw_data/` (Kaggle or generated)
 - [ ] 6 containers `Up`
-- [ ] `airflow config get-value core executor` returns `LocalExecutor`
-- [ ] `airflow tasks list oltp_s3_olap_pipeline` returns 18 tasks
-- [ ] `import pyarrow` succeeds inside the Airflow container
 - [ ] `SELECT count(*) FROM orders` in the OLTP DB returns ~99,441
-- [ ] DAG `oltp_s3_olap_pipeline` succeeds — all 18 tasks green
+- [ ] DAG `oltp_s3_olap_pipeline` succeeds — all 20 tasks green (18 extract/load + `dbt_run` + `dbt_test`)
 - [ ] `extract_orders_to_minio` log shows the contract **passing**
-- [ ] Another table's log shows the contract being **bypassed**
+- [ ] Every table's log shows its contract passing on a sampled batch
 - [ ] `staging-lake` holds 9 partitioned Parquet objects
 - [ ] 9 `raw_*` tables in the warehouse
-- [ ] `dbt run --full-refresh` builds 15 models
-- [ ] `dbt test` reports `PASS=10`
+- [ ] `dbt run --full-refresh` builds 16 models
+- [ ] `dbt test` reports `PASS=24`
 - [ ] One test made to fail, then fixed, in its own commit
 - [ ] Metabase dashboard reads marts, not `raw_*`
 - [ ] Phase 9 done, with before/after row counts written down

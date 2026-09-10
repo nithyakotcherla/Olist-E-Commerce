@@ -1,0 +1,15 @@
+This project began as a clone of:
+
+    rtmagar/ecommerce-elt-pipeline
+    https://github.com/rtmagar/ecommerce-elt-pipeline
+    Copyright (c) Rahul Thapa Magar
+
+The original repository contributed the initial pipeline architecture: the
+Docker Compose topology, the extract/load DAG, the dbt staging and mart models,
+and the README's architecture documentation.
+
+Subsequent work in this repository -- data contracts for all nine tables,
+typed and sampled contract validation, the dbt run/test tasks inside Airflow,
+named volumes and container healthchecks, the TRUNCATE-and-append load
+strategy, dim_geography, expanded schema tests, the synthetic dataset
+generator, and the implementation and study guides -- is by Amruth Ganta.
