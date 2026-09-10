@@ -1,32 +1,18 @@
-"""Seed the simulated production database from the Kaggle CSVs.
-
-Runs on the HOST, not in a container -- it connects to localhost:5433, the
-published port of postgres-oltp. Requires the 9 CSVs in raw_data/ (Phase 1)
-and the containers up (Phase 2).
-
-    uv run python init_oltp_db.py
-
-Safely re-runnable: every table is written with if_exists="replace".
-"""
-
-from __future__ import annotations
-
 import os
-import sys
-
 import pandas as pd
 from sqlalchemy import create_engine
 
-DB_URL = os.getenv(
-    "OLTP_DB_URL",
-    "postgresql+psycopg2://admin:admin_password@localhost:5433/olist_production",
-)
+# Database connection string for the OLTP database (matching docker-compose)
+DB_USER = "admin"
+DB_PASS = "admin_password"
+DB_HOST = "localhost" # Assuming you run this script on your host machine
+DB_PORT = "5433"
+DB_NAME = "olist_production"
 
-RAW_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "raw_data")
+# Create SQLAlchemy engine
+engine = create_engine(f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
 
-# The keys are the exact filenames the Kaggle archive ships. A renamed file is
-# not an error -- it is skipped with a warning, and only surfaces as a dbt
-# failure three phases later. Match them exactly.
+# Mapping of the exact Kaggle CSV filenames to our desired table names
 csv_to_table_mapping = {
     "olist_customers_dataset.csv": "customers",
     "olist_geolocation_dataset.csv": "geolocation",
@@ -39,28 +25,35 @@ csv_to_table_mapping = {
     "product_category_name_translation.csv": "product_category_name_translation",
 }
 
+RAW_DATA_DIR = "./raw_data"
 
-def main() -> int:
-    engine = create_engine(DB_URL)
-
-    loaded, skipped = 0, 0
-    for filename, table_name in csv_to_table_mapping.items():
-        path = os.path.join(RAW_DATA_DIR, filename)
-
-        if not os.path.exists(path):
-            print(f"WARNING: File {path} not found. Skipping {table_name}.")
-            skipped += 1
+def load_data():
+    print("Starting initial data load into OLTP Database...")
+    
+    for csv_file, table_name in csv_to_table_mapping.items():
+        file_path = os.path.join(RAW_DATA_DIR, csv_file)
+        
+        if not os.path.exists(file_path):
+            print(f"WARNING: File {file_path} not found. Skipping {table_name}.")
             continue
+            
+        print(f"Reading {csv_file}...")
+        # Read CSV into Pandas DataFrame
+        df = pd.read_csv(file_path)
+        
+        print(f"Loading {len(df)} rows into table '{table_name}'...")
+        # Write the data to Postgres. 'replace' drops the table if it exists and recreates it.
+        df.to_sql(
+            name=table_name,
+            con=engine,
+            if_exists="replace",
+            index=False,
+            method="multi",
+            chunksize=10000,
+        )
+        print(f"Successfully loaded {table_name}.\n")
 
-        print(f"Loading {filename} -> {table_name} ...", end=" ", flush=True)
-        df = pd.read_csv(path)
-        df.to_sql(name=table_name, con=engine, if_exists="replace", index=False)
-        print(f"{len(df):,} rows")
-        loaded += 1
-
-    print(f"\nDone. {loaded} tables loaded, {skipped} skipped.")
-    return 1 if skipped else 0
-
+    print("Initial OLTP database setup complete!")
 
 if __name__ == "__main__":
-    sys.exit(main())
+    load_data()
