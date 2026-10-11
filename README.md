@@ -1,6 +1,22 @@
 # E-Commerce ELT Pipeline
 
+### Nithya Niharika Kotcherla — orchestration, transformation and BI
+- **Airflow DAG:** the 18 extract/load tasks (OLTP → MinIO → warehouse) with
+  date-partitioned Parquet paths, and the `dbt run` / `dbt test` tasks that close the DAG
+- **Warehouse load strategy:** TRUNCATE-and-append instead of DROP, so reloads
+  don't break the dbt views built on the raw tables
+- **dbt project:** source declarations, the 9 staging models, the star schema
+  (4 dimensions, 3 facts), the incremental `fact_sales` 
+- **dbt test suite:** 24 schema tests (unique, not_null, relationships, accepted_values)
+- **Metabase dashboards:** revenue, payments, reviews and delivery metrics on the star schema
 
+### Amruth Ganta — infrastructure, data quality and data setup
+- **Docker Compose stack:** six services, named volumes and container healthchecks
+- **Data contracts:** JSON Schema contracts for all nine tables, with typed,
+  sampled validation at extraction
+- **Source data:** OLTP seed script and the synthetic Olist dataset generator
+- **Tooling:** host/container dependency split (uv + requirements.txt)
+- **Documentation:** implementation guide and study notes
 <img src="assets/db.png" width="800" height="700" alt="Pipeline Architecture">
 
 This project simulates a high-volume e-commerce business environment where transactional data is generated continuously. Instead of running slow, complex analytical queries directly against the production database, this solution implements an automated ELT (Extract, Load, Transform) pipeline. It extracts raw operational data, strictly validates it against Data Contracts, stages it securely in a Data Lake, and uses dbt to model a highly efficient Star Schema in a PostgreSQL Data Warehouse.
